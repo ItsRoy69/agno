@@ -2764,11 +2764,14 @@ class Step:
                 images.append(Image(url=img_artifact.url))
 
             elif img_artifact.filepath:
+                # Pass through filepath-based images directly
                 image_kwargs: Dict[str, Any] = {"filepath": img_artifact.filepath}
+                if img_artifact.format:
+                    image_kwargs["format"] = img_artifact.format
                 if img_artifact.mime_type:
                     if "/" in img_artifact.mime_type:
                         format_from_mime = img_artifact.mime_type.split("/")[-1]
-                        image_kwargs["format"] = format_from_mime
+                        image_kwargs.setdefault("format", format_from_mime)
                 images.append(Image(**image_kwargs))
 
             elif img_artifact.content:
