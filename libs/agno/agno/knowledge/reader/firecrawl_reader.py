@@ -28,10 +28,13 @@ class FirecrawlReader(Reader):
         mode: Literal["scrape", "crawl"] = "scrape",
         chunk: bool = True,
         chunk_size: int = 5000,
-        chunking_strategy: Optional[ChunkingStrategy] = SemanticChunking(),
+        chunking_strategy: Optional[ChunkingStrategy] = None,
         name: Optional[str] = None,
         description: Optional[str] = None,
     ) -> None:
+        if chunking_strategy is None:
+            chunking_strategy = SemanticChunking(chunk_size=chunk_size)
+
         # Initialise base Reader (handles chunk_size / strategy)
         super().__init__(
             chunk=chunk, chunk_size=chunk_size, chunking_strategy=chunking_strategy, name=name, description=description
@@ -43,9 +46,10 @@ class FirecrawlReader(Reader):
         self.mode = mode
 
     @classmethod
-    def get_supported_chunking_strategies(self) -> List[ChunkingStrategyType]:
+    def get_supported_chunking_strategies(cls) -> List[ChunkingStrategyType]:
         """Get the list of supported chunking strategies for Firecrawl readers."""
         return [
+            ChunkingStrategyType.CODE_CHUNKER,
             ChunkingStrategyType.SEMANTIC_CHUNKER,
             ChunkingStrategyType.FIXED_SIZE_CHUNKER,
             ChunkingStrategyType.AGENTIC_CHUNKER,
@@ -54,7 +58,7 @@ class FirecrawlReader(Reader):
         ]
 
     @classmethod
-    def get_supported_content_types(self) -> List[ContentType]:
+    def get_supported_content_types(cls) -> List[ContentType]:
         return [ContentType.URL]
 
     def scrape(self, url: str, name: Optional[str] = None) -> List[Document]:

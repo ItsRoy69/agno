@@ -14,7 +14,7 @@ except ImportError as e:
 from agno.filters import FilterExpr
 from agno.knowledge.document import Document
 from agno.knowledge.embedder import Embedder
-from agno.utils.log import log_debug, log_error, log_info, log_warning
+from agno.utils.log import log_debug, log_error, log_warning
 from agno.vectordb.base import VectorDb
 from agno.vectordb.distance import Distance
 
@@ -27,14 +27,8 @@ class SurrealDb(VectorDb):
         DEFINE TABLE IF NOT EXISTS {collection} SCHEMAFUL;
         DEFINE FIELD IF NOT EXISTS content ON {collection} TYPE string;
         DEFINE FIELD IF NOT EXISTS embedding ON {collection} TYPE array<float>;
-        DEFINE FIELD IF NOT EXISTS meta_data ON {collection} FLEXIBLE TYPE object;
+        DEFINE FIELD IF NOT EXISTS meta_data ON {collection} TYPE object FLEXIBLE;
         DEFINE INDEX IF NOT EXISTS vector_idx ON {collection} FIELDS embedding HNSW DIMENSION {dimensions} DIST {distance};
-    """
-
-    DOC_EXISTS_QUERY: Final[str] = """
-        SELECT * FROM {collection}
-        WHERE content = $content
-        LIMIT 1
     """
 
     NAME_EXISTS_QUERY: Final[str] = """
@@ -141,7 +135,7 @@ class SurrealDb(VectorDb):
             from agno.knowledge.embedder.openai import OpenAIEmbedder
 
             embedder = OpenAIEmbedder()
-            log_info("Embedder not provided, using OpenAIEmbedder as default.")
+            log_debug("Embedder not provided, using OpenAIEmbedder as default.")
         self.embedder: Embedder = embedder
         self.dimensions = self.embedder.dimensions
         self.collection = collection
@@ -220,23 +214,6 @@ class SurrealDb(VectorDb):
                 m=self.m,
             )
             self.client.query(query)
-
-    def doc_exists(self, document: Document) -> bool:
-        """Check if a document exists by its content.
-
-        Args:
-            document: The document to check.
-
-        Returns:
-            True if the document exists, False otherwise.
-
-        """
-        log_debug(f"Checking if document exists: {document.content}")
-        result = self.client.query(
-            self.DOC_EXISTS_QUERY.format(collection=self.collection),
-            {"content": document.content},
-        )
-        return bool(self._extract_result(result))
 
     def name_exists(self, name: str) -> bool:
         """Check if a document exists by its name.
@@ -493,19 +470,6 @@ class SurrealDb(VectorDb):
             ),
         )
 
-    async def async_doc_exists(self, document: Document) -> bool:
-        """Check if a document exists by its content asynchronously.
-
-        Returns:
-            True if the document exists, False otherwise.
-
-        """
-        response = await self.async_client.query(
-            self.DOC_EXISTS_QUERY.format(collection=self.collection),
-            {"content": document.content},
-        )
-        return bool(self._extract_result(response))
-
     async def async_name_exists(self, name: str) -> bool:
         """Check if a document exists by its name asynchronously.
 
@@ -691,7 +655,7 @@ class SurrealDb(VectorDb):
             log_debug(f"Updated metadata for {updated_count} documents with content_id: {content_id}")
 
         except Exception as e:
-            log_error(f"Error updating metadata for content_id '{content_id}': {e}")
+            log_error(f"Error updating metadata for content_id '{content_id}': {str(e)}")
             raise
 
     def get_supported_search_types(self) -> List[str]:

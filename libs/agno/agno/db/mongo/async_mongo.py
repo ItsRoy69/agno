@@ -4,6 +4,14 @@ from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+try:
+    from pymongo.errors import DuplicateKeyError
+except ImportError:
+    DuplicateKeyError = Exception  # type: ignore[assignment,misc]
+
+if TYPE_CHECKING:
+    from agno.tracing.schemas import Span, Trace
+
 from agno.db.base import AsyncBaseDb, SessionType
 from agno.db.mongo.utils import (
     apply_pagination,
@@ -37,8 +45,8 @@ except ImportError:
 
 try:
     from pymongo import AsyncMongoClient  # type: ignore
-    from pymongo.collection import AsyncCollection  # type: ignore
-    from pymongo.database import AsyncDatabase  # type: ignore
+    from pymongo.asynchronous.collection import AsyncCollection  # type: ignore
+    from pymongo.asynchronous.database import AsyncDatabase  # type: ignore
 
     PYMONGO_ASYNC_AVAILABLE = True
 except ImportError:
@@ -144,6 +152,9 @@ class AsyncMongoDb(AsyncBaseDb):
         eval_collection: Optional[str] = None,
         knowledge_collection: Optional[str] = None,
         culture_collection: Optional[str] = None,
+        traces_collection: Optional[str] = None,
+        spans_collection: Optional[str] = None,
+        learnings_collection: Optional[str] = None,
         id: Optional[str] = None,
     ):
         """
@@ -165,6 +176,9 @@ class AsyncMongoDb(AsyncBaseDb):
             eval_collection (Optional[str]): Name of the collection to store evaluation runs.
             knowledge_collection (Optional[str]): Name of the collection to store knowledge documents.
             culture_collection (Optional[str]): Name of the collection to store cultural knowledge.
+            traces_collection (Optional[str]): Name of the collection to store traces.
+            spans_collection (Optional[str]): Name of the collection to store spans.
+            learnings_collection (Optional[str]): Name of the collection to store learnings.
             id (Optional[str]): ID of the database.
 
         Raises:
@@ -185,6 +199,9 @@ class AsyncMongoDb(AsyncBaseDb):
             eval_table=eval_collection,
             knowledge_table=knowledge_collection,
             culture_table=culture_collection,
+            traces_table=traces_collection,
+            spans_table=spans_collection,
+            learnings_table=learnings_collection,
         )
 
         # Detect client type if provided
@@ -239,6 +256,21 @@ class AsyncMongoDb(AsyncBaseDb):
         for collection_type, collection_name in collections_to_create:
             if collection_name and not await self.table_exists(collection_name):
                 await self._get_collection(collection_type, create_collection_if_not_found=True)
+
+    async def close(self) -> None:
+        """Close the MongoDB client connection.
+
+        Should be called during application shutdown to properly release
+        all database connections.
+        """
+        if self._client is not None:
+            import inspect
+
+            close_result = self._client.close()
+            if inspect.isawaitable(close_result):
+                await close_result
+            self._client = None
+            self._database = None
 
     def _ensure_client(self) -> AsyncMongoClientType:
         """
@@ -410,6 +442,39 @@ class AsyncMongoDb(AsyncBaseDb):
                 )
             return self.culture_collection
 
+        if table_type == "traces":
+            if reset_cache or not hasattr(self, "traces_collection"):
+                if self.trace_table_name is None:
+                    raise ValueError("Traces collection was not provided on initialization")
+                self.traces_collection = await self._get_or_create_collection(
+                    collection_name=self.trace_table_name,
+                    collection_type="traces",
+                    create_collection_if_not_found=create_collection_if_not_found,
+                )
+            return self.traces_collection
+
+        if table_type == "spans":
+            if reset_cache or not hasattr(self, "spans_collection"):
+                if self.span_table_name is None:
+                    raise ValueError("Spans collection was not provided on initialization")
+                self.spans_collection = await self._get_or_create_collection(
+                    collection_name=self.span_table_name,
+                    collection_type="spans",
+                    create_collection_if_not_found=create_collection_if_not_found,
+                )
+            return self.spans_collection
+
+        if table_type == "learnings":
+            if reset_cache or not hasattr(self, "learnings_collection"):
+                if self.learnings_table_name is None:
+                    raise ValueError("Learnings collection was not provided on initialization")
+                self.learnings_collection = await self._get_or_create_collection(
+                    collection_name=self.learnings_table_name,
+                    collection_type="learnings",
+                    create_collection_if_not_found=create_collection_if_not_found,
+                )
+            return self.learnings_collection
+
         raise ValueError(f"Unknown table type: {table_type}")
 
     async def _get_or_create_collection(
@@ -441,7 +506,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return collection
 
         except Exception as e:
-            log_error(f"Error getting collection {collection_name}: {e}")
+            log_error(f"Error getting collection {collection_name}: {str(e)}")
             raise
 
     def get_latest_schema_version(self):
@@ -454,11 +519,12 @@ class AsyncMongoDb(AsyncBaseDb):
 
     # -- Session methods --
 
-    async def delete_session(self, session_id: str) -> bool:
+    async def delete_session(self, session_id: str, user_id: Optional[str] = None) -> bool:
         """Delete a session from the database.
 
         Args:
             session_id (str): The ID of the session to delete.
+            user_id (Optional[str]): User ID to filter by. Defaults to None.
 
         Returns:
             bool: True if the session was deleted, False otherwise.
@@ -471,7 +537,10 @@ class AsyncMongoDb(AsyncBaseDb):
             if collection is None:
                 return False
 
-            result = await collection.delete_one({"session_id": session_id})
+            query: Dict[str, Any] = {"session_id": session_id}
+            if user_id is not None:
+                query["user_id"] = user_id
+            result = await collection.delete_one(query)
             if result.deleted_count == 0:
                 log_debug(f"No session found to delete with session_id: {session_id}")
                 return False
@@ -480,25 +549,29 @@ class AsyncMongoDb(AsyncBaseDb):
                 return True
 
         except Exception as e:
-            log_error(f"Error deleting session: {e}")
+            log_error(f"Error deleting session: {str(e)}")
             raise e
 
-    async def delete_sessions(self, session_ids: List[str]) -> None:
+    async def delete_sessions(self, session_ids: List[str], user_id: Optional[str] = None) -> None:
         """Delete multiple sessions from the database.
 
         Args:
             session_ids (List[str]): The IDs of the sessions to delete.
+            user_id (Optional[str]): User ID to filter by. Defaults to None.
         """
         try:
             collection = await self._get_collection(table_type="sessions")
             if collection is None:
                 return
 
-            result = await collection.delete_many({"session_id": {"$in": session_ids}})
+            query: Dict[str, Any] = {"session_id": {"$in": session_ids}}
+            if user_id is not None:
+                query["user_id"] = user_id
+            result = await collection.delete_many(query)
             log_debug(f"Successfully deleted {result.deleted_count} sessions")
 
         except Exception as e:
-            log_error(f"Error deleting sessions: {e}")
+            log_error(f"Error deleting sessions: {str(e)}")
             raise e
 
     async def get_session(
@@ -532,8 +605,6 @@ class AsyncMongoDb(AsyncBaseDb):
             query = {"session_id": session_id}
             if user_id is not None:
                 query["user_id"] = user_id
-            if session_type is not None:
-                query["session_type"] = session_type
 
             result = await collection.find_one(query)
             if result is None:
@@ -553,7 +624,7 @@ class AsyncMongoDb(AsyncBaseDb):
                 raise ValueError(f"Invalid session type: {session_type}")
 
         except Exception as e:
-            log_error(f"Exception reading session: {e}")
+            log_error(f"Exception reading session: {str(e)}")
             raise e
 
     async def get_sessions(
@@ -664,11 +735,16 @@ class AsyncMongoDb(AsyncBaseDb):
             return sessions
 
         except Exception as e:
-            log_error(f"Exception reading sessions: {e}")
+            log_error(f"Exception reading sessions: {str(e)}")
             raise e
 
     async def rename_session(
-        self, session_id: str, session_type: SessionType, session_name: str, deserialize: Optional[bool] = True
+        self,
+        session_id: str,
+        session_type: SessionType,
+        session_name: str,
+        user_id: Optional[str] = None,
+        deserialize: Optional[bool] = True,
     ) -> Optional[Union[Session, Dict[str, Any]]]:
         """Rename a session in the database.
 
@@ -676,6 +752,7 @@ class AsyncMongoDb(AsyncBaseDb):
             session_id (str): The ID of the session to rename.
             session_type (SessionType): The type of session to rename.
             session_name (str): The new name of the session.
+            user_id (Optional[str]): User ID to filter by. Defaults to None.
             deserialize (Optional[bool]): Whether to serialize the session. Defaults to True.
 
         Returns:
@@ -691,9 +768,12 @@ class AsyncMongoDb(AsyncBaseDb):
             if collection is None:
                 return None
 
+            query: Dict[str, Any] = {"session_id": session_id}
+            if user_id is not None:
+                query["user_id"] = user_id
             try:
                 result = await collection.find_one_and_update(
-                    {"session_id": session_id},
+                    query,
                     {"$set": {"session_data.session_name": session_name, "updated_at": int(time.time())}},
                     return_document=ReturnDocument.AFTER,
                     upsert=False,
@@ -701,7 +781,7 @@ class AsyncMongoDb(AsyncBaseDb):
             except OperationFailure:
                 # If the update fails because session_data doesn't contain a session_name yet, we initialize session_data
                 result = await collection.find_one_and_update(
-                    {"session_id": session_id},
+                    query,
                     {"$set": {"session_data": {"session_name": session_name}, "updated_at": int(time.time())}},
                     return_document=ReturnDocument.AFTER,
                     upsert=False,
@@ -722,7 +802,7 @@ class AsyncMongoDb(AsyncBaseDb):
                 return WorkflowSession.from_dict(deserialized_session)
 
         except Exception as e:
-            log_error(f"Exception renaming session: {e}")
+            log_error(f"Exception renaming session: {str(e)}")
             raise e
 
     async def upsert_session(
@@ -747,6 +827,19 @@ class AsyncMongoDb(AsyncBaseDb):
 
             session_dict = session.to_dict()
 
+            existing = await collection.find_one({"session_id": session_dict.get("session_id")}, {"user_id": 1})
+            if existing:
+                existing_uid = existing.get("user_id")
+                if existing_uid is not None and existing_uid != session_dict.get("user_id"):
+                    return None
+
+            incoming_uid = session_dict.get("user_id")
+            upsert_filter: Dict[str, Any] = {"session_id": session_dict.get("session_id")}
+            if incoming_uid is not None:
+                upsert_filter["$or"] = [{"user_id": incoming_uid}, {"user_id": None}, {"user_id": {"$exists": False}}]
+            else:
+                upsert_filter["$or"] = [{"user_id": None}, {"user_id": {"$exists": False}}]
+
             if isinstance(session, AgentSession):
                 record = {
                     "session_id": session_dict.get("session_id"),
@@ -762,12 +855,15 @@ class AsyncMongoDb(AsyncBaseDb):
                     "updated_at": int(time.time()),
                 }
 
-                result = await collection.find_one_and_replace(
-                    filter={"session_id": session_dict.get("session_id")},
-                    replacement=record,
-                    upsert=True,
-                    return_document=ReturnDocument.AFTER,
-                )
+                try:
+                    result = await collection.find_one_and_replace(
+                        filter=upsert_filter,
+                        replacement=record,
+                        upsert=True,
+                        return_document=ReturnDocument.AFTER,
+                    )
+                except DuplicateKeyError:
+                    return None
                 if not result:
                     return None
 
@@ -793,12 +889,15 @@ class AsyncMongoDb(AsyncBaseDb):
                     "updated_at": int(time.time()),
                 }
 
-                result = await collection.find_one_and_replace(
-                    filter={"session_id": session_dict.get("session_id")},
-                    replacement=record,
-                    upsert=True,
-                    return_document=ReturnDocument.AFTER,
-                )
+                try:
+                    result = await collection.find_one_and_replace(
+                        filter=upsert_filter,
+                        replacement=record,
+                        upsert=True,
+                        return_document=ReturnDocument.AFTER,
+                    )
+                except DuplicateKeyError:
+                    return None
                 if not result:
                     return None
 
@@ -825,12 +924,15 @@ class AsyncMongoDb(AsyncBaseDb):
                     "updated_at": int(time.time()),
                 }
 
-                result = await collection.find_one_and_replace(
-                    filter={"session_id": session_dict.get("session_id")},
-                    replacement=record,
-                    upsert=True,
-                    return_document=ReturnDocument.AFTER,
-                )
+                try:
+                    result = await collection.find_one_and_replace(
+                        filter=upsert_filter,
+                        replacement=record,
+                        upsert=True,
+                        return_document=ReturnDocument.AFTER,
+                    )
+                except DuplicateKeyError:
+                    return None
                 if not result:
                     return None
 
@@ -842,7 +944,7 @@ class AsyncMongoDb(AsyncBaseDb):
                 return WorkflowSession.from_dict(session)  # type: ignore
 
         except Exception as e:
-            log_error(f"Exception upserting session: {e}")
+            log_error(f"Exception upserting session: {str(e)}")
             raise e
 
     async def upsert_sessions(
@@ -976,7 +1078,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return results
 
         except Exception as e:
-            log_error(f"Exception during bulk session upsert, falling back to individual upserts: {e}")
+            log_error(f"Exception during bulk session upsert, falling back to individual upserts: {str(e)}")
 
             # Fallback to individual upserts
             return [
@@ -1020,7 +1122,7 @@ class AsyncMongoDb(AsyncBaseDb):
                 log_debug(f"No memory found with id: {memory_id}")
 
         except Exception as e:
-            log_error(f"Error deleting memory: {e}")
+            log_error(f"Error deleting memory: {str(e)}")
             raise e
 
     async def delete_user_memories(self, memory_ids: List[str], user_id: Optional[str] = None) -> None:
@@ -1048,7 +1150,7 @@ class AsyncMongoDb(AsyncBaseDb):
                 log_debug(f"No memories found with ids: {memory_ids}")
 
         except Exception as e:
-            log_error(f"Error deleting memories: {e}")
+            log_error(f"Error deleting memories: {str(e)}")
             raise e
 
     async def get_all_memory_topics(self, user_id: Optional[str] = None) -> List[str]:
@@ -1076,7 +1178,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return [topic for topic in topics if topic]
 
         except Exception as e:
-            log_error(f"Exception reading from collection: {e}")
+            log_error(f"Exception reading from collection: {str(e)}")
             raise e
 
     async def get_user_memory(
@@ -1115,7 +1217,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return UserMemory.from_dict(result_filtered)
 
         except Exception as e:
-            log_error(f"Exception reading from collection: {e}")
+            log_error(f"Exception reading from collection: {str(e)}")
             raise e
 
     async def get_user_memories(
@@ -1195,7 +1297,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return [UserMemory.from_dict({k: v for k, v in record.items() if k != "_id"}) for record in records]
 
         except Exception as e:
-            log_error(f"Exception reading from collection: {e}")
+            log_error(f"Exception reading from collection: {str(e)}")
             raise e
 
     async def get_user_memory_stats(
@@ -1263,7 +1365,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return formatted_results, total_count
 
         except Exception as e:
-            log_error(f"Exception getting user memory stats: {e}")
+            log_error(f"Exception getting user memory stats: {str(e)}")
             raise e
 
     async def upsert_user_memory(
@@ -1314,7 +1416,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return UserMemory.from_dict(update_doc_filtered)
 
         except Exception as e:
-            log_error(f"Exception upserting user memory: {e}")
+            log_error(f"Exception upserting user memory: {str(e)}")
             raise e
 
     async def upsert_memories(
@@ -1399,7 +1501,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return results
 
         except Exception as e:
-            log_error(f"Exception during bulk memory upsert, falling back to individual upserts: {e}")
+            log_error(f"Exception during bulk memory upsert, falling back to individual upserts: {str(e)}")
 
             # Fallback to individual upserts
             return [
@@ -1424,7 +1526,7 @@ class AsyncMongoDb(AsyncBaseDb):
             await collection.delete_many({})
 
         except Exception as e:
-            log_error(f"Exception deleting all memories: {e}")
+            log_error(f"Exception deleting all memories: {str(e)}")
             raise e
 
     # -- Cultural Knowledge methods --
@@ -1442,7 +1544,7 @@ class AsyncMongoDb(AsyncBaseDb):
             await collection.delete_many({})
 
         except Exception as e:
-            log_error(f"Exception deleting all cultural knowledge: {e}")
+            log_error(f"Exception deleting all cultural knowledge: {str(e)}")
             raise e
 
     async def delete_cultural_knowledge(self, id: str) -> None:
@@ -1463,7 +1565,7 @@ class AsyncMongoDb(AsyncBaseDb):
             log_debug(f"Deleted cultural knowledge with ID: {id}")
 
         except Exception as e:
-            log_error(f"Error deleting cultural knowledge: {e}")
+            log_error(f"Error deleting cultural knowledge: {str(e)}")
             raise e
 
     async def get_cultural_knowledge(
@@ -1499,7 +1601,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return deserialize_cultural_knowledge_from_db(result_filtered)
 
         except Exception as e:
-            log_error(f"Error getting cultural knowledge: {e}")
+            log_error(f"Error getting cultural knowledge: {str(e)}")
             raise e
 
     async def get_all_cultural_knowledge(
@@ -1575,7 +1677,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return [deserialize_cultural_knowledge_from_db(item) for item in results_filtered]
 
         except Exception as e:
-            log_error(f"Error getting all cultural knowledge: {e}")
+            log_error(f"Error getting all cultural knowledge: {str(e)}")
             raise e
 
     async def upsert_cultural_knowledge(
@@ -1629,7 +1731,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return deserialize_cultural_knowledge_from_db(doc_filtered)
 
         except Exception as e:
-            log_error(f"Error upserting cultural knowledge: {e}")
+            log_error(f"Error upserting cultural knowledge: {str(e)}")
             raise e
 
     # -- Metrics methods --
@@ -1664,7 +1766,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return results
 
         except Exception as e:
-            log_error(f"Exception reading from sessions collection: {e}")
+            log_error(f"Exception reading from sessions collection: {str(e)}")
             return []
 
     async def _get_metrics_calculation_starting_date(self, collection: AsyncMongoCollectionType) -> Optional[date]:
@@ -1691,7 +1793,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return datetime.fromtimestamp(first_session_date, tz=timezone.utc).date()
 
         except Exception as e:
-            log_error(f"Exception getting metrics calculation starting date: {e}")
+            log_error(f"Exception getting metrics calculation starting date: {str(e)}")
             return None
 
     async def calculate_metrics(self) -> Optional[list[dict]]:
@@ -1750,7 +1852,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return results
 
         except Exception as e:
-            log_error(f"Error calculating metrics: {e}")
+            log_error(f"Error calculating metrics: {str(e)}")
             raise e
 
     async def get_metrics(
@@ -1783,7 +1885,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return records, latest_updated_at
 
         except Exception as e:
-            log_error(f"Error getting metrics: {e}")
+            log_error(f"Error getting metrics: {str(e)}")
             raise e
 
     # -- Knowledge methods --
@@ -1807,7 +1909,7 @@ class AsyncMongoDb(AsyncBaseDb):
             log_debug(f"Deleted knowledge content with id '{id}'")
 
         except Exception as e:
-            log_error(f"Error deleting knowledge content: {e}")
+            log_error(f"Error deleting knowledge content: {str(e)}")
             raise e
 
     async def get_knowledge_content(self, id: str) -> Optional[KnowledgeRow]:
@@ -1834,7 +1936,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return KnowledgeRow.model_validate(result)
 
         except Exception as e:
-            log_error(f"Error getting knowledge content: {e}")
+            log_error(f"Error getting knowledge content: {str(e)}")
             raise e
 
     async def get_knowledge_contents(
@@ -1843,6 +1945,7 @@ class AsyncMongoDb(AsyncBaseDb):
         page: Optional[int] = None,
         sort_by: Optional[str] = None,
         sort_order: Optional[str] = None,
+        linked_to: Optional[str] = None,
     ) -> Tuple[List[KnowledgeRow], int]:
         """Get all knowledge contents from the database.
 
@@ -1851,6 +1954,7 @@ class AsyncMongoDb(AsyncBaseDb):
             page (Optional[int]): The page number.
             sort_by (Optional[str]): The column to sort by.
             sort_order (Optional[str]): The order to sort by.
+            linked_to (Optional[str]): Filter by linked_to value (knowledge instance name).
 
         Returns:
             Tuple[List[KnowledgeRow], int]: The knowledge contents and total count.
@@ -1864,6 +1968,10 @@ class AsyncMongoDb(AsyncBaseDb):
                 return [], 0
 
             query: Dict[str, Any] = {}
+
+            # Apply linked_to filter if provided
+            if linked_to is not None:
+                query["linked_to"] = linked_to
 
             # Get total count
             total_count = await collection.count_documents(query)
@@ -1888,7 +1996,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return knowledge_rows, total_count
 
         except Exception as e:
-            log_error(f"Error getting knowledge contents: {e}")
+            log_error(f"Error getting knowledge contents: {str(e)}")
             raise e
 
     async def upsert_knowledge_content(self, knowledge_row: KnowledgeRow):
@@ -1914,7 +2022,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return knowledge_row
 
         except Exception as e:
-            log_error(f"Error upserting knowledge content: {e}")
+            log_error(f"Error upserting knowledge content: {str(e)}")
             raise e
 
     # -- Eval methods --
@@ -1938,7 +2046,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return eval_run
 
         except Exception as e:
-            log_error(f"Error creating eval run: {e}")
+            log_error(f"Error creating eval run: {str(e)}")
             raise e
 
     async def delete_eval_run(self, eval_run_id: str) -> None:
@@ -1956,7 +2064,7 @@ class AsyncMongoDb(AsyncBaseDb):
                 log_debug(f"Deleted eval run with ID: {eval_run_id}")
 
         except Exception as e:
-            log_error(f"Error deleting eval run {eval_run_id}: {e}")
+            log_error(f"Error deleting eval run {eval_run_id}: {str(e)}")
             raise e
 
     async def delete_eval_runs(self, eval_run_ids: List[str]) -> None:
@@ -1974,7 +2082,7 @@ class AsyncMongoDb(AsyncBaseDb):
                 log_debug(f"Deleted {result.deleted_count} eval runs")
 
         except Exception as e:
-            log_error(f"Error deleting eval runs {eval_run_ids}: {e}")
+            log_error(f"Error deleting eval runs {eval_run_ids}: {str(e)}")
             raise e
 
     async def get_eval_run_raw(self, eval_run_id: str) -> Optional[Dict[str, Any]]:
@@ -1988,7 +2096,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return result
 
         except Exception as e:
-            log_error(f"Exception getting eval run {eval_run_id}: {e}")
+            log_error(f"Exception getting eval run {eval_run_id}: {str(e)}")
             raise e
 
     async def get_eval_run(
@@ -2024,7 +2132,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return EvalRunRecord.model_validate(eval_run_raw)
 
         except Exception as e:
-            log_error(f"Exception getting eval run {eval_run_id}: {e}")
+            log_error(f"Exception getting eval run {eval_run_id}: {str(e)}")
             raise e
 
     async def get_eval_runs(
@@ -2118,7 +2226,7 @@ class AsyncMongoDb(AsyncBaseDb):
             return [EvalRunRecord.model_validate(row) for row in records]
 
         except Exception as e:
-            log_error(f"Exception getting eval runs: {e}")
+            log_error(f"Exception getting eval runs: {str(e)}")
             raise e
 
     async def rename_eval_run(
@@ -2156,5 +2264,789 @@ class AsyncMongoDb(AsyncBaseDb):
             return EvalRunRecord.model_validate(result)
 
         except Exception as e:
-            log_error(f"Error updating eval run name {eval_run_id}: {e}")
+            log_error(f"Error updating eval run name {eval_run_id}: {str(e)}")
             raise e
+
+    # --- Traces ---
+    def _get_component_level(
+        self, workflow_id: Optional[str], team_id: Optional[str], agent_id: Optional[str], name: str
+    ) -> int:
+        """Get the component level for a trace based on its context.
+
+        Component levels (higher = more important):
+            - 3: Workflow root (.run or .arun with workflow_id)
+            - 2: Team root (.run or .arun with team_id)
+            - 1: Agent root (.run or .arun with agent_id)
+            - 0: Child span (not a root)
+
+        Args:
+            workflow_id: The workflow ID of the trace.
+            team_id: The team ID of the trace.
+            agent_id: The agent ID of the trace.
+            name: The name of the trace.
+
+        Returns:
+            int: The component level (0-3).
+        """
+        # Check if name indicates a root span
+        is_root_name = ".run" in name or ".arun" in name
+
+        if not is_root_name:
+            return 0  # Child span (not a root)
+        elif workflow_id:
+            return 3  # Workflow root
+        elif team_id:
+            return 2  # Team root
+        elif agent_id:
+            return 1  # Agent root
+        else:
+            return 0  # Unknown
+
+    async def upsert_trace(self, trace: "Trace") -> None:
+        """Create or update a single trace record in the database.
+
+        Uses MongoDB's update_one with upsert=True and aggregation pipeline
+        to handle concurrent inserts atomically and avoid race conditions.
+
+        Args:
+            trace: The Trace object to store (one per trace_id).
+        """
+        try:
+            collection = await self._get_collection(table_type="traces", create_collection_if_not_found=True)
+            if collection is None:
+                return
+
+            trace_dict = trace.to_dict()
+            trace_dict.pop("total_spans", None)
+            trace_dict.pop("error_count", None)
+
+            # Calculate the component level for the new trace
+            new_level = self._get_component_level(trace.workflow_id, trace.team_id, trace.agent_id, trace.name)
+
+            # Use MongoDB aggregation pipeline update for atomic upsert
+            # This allows conditional logic within a single atomic operation
+            pipeline: List[Dict[str, Any]] = [
+                {
+                    "$set": {
+                        # Always update these fields
+                        "status": trace.status,
+                        "created_at": {"$ifNull": ["$created_at", trace_dict.get("created_at")]},
+                        # Use $min for start_time (keep earliest)
+                        "start_time": {
+                            "$cond": {
+                                "if": {"$eq": [{"$type": "$start_time"}, "missing"]},
+                                "then": trace_dict.get("start_time"),
+                                "else": {"$min": ["$start_time", trace_dict.get("start_time")]},
+                            }
+                        },
+                        # Use $max for end_time (keep latest)
+                        "end_time": {
+                            "$cond": {
+                                "if": {"$eq": [{"$type": "$end_time"}, "missing"]},
+                                "then": trace_dict.get("end_time"),
+                                "else": {"$max": ["$end_time", trace_dict.get("end_time")]},
+                            }
+                        },
+                        # Preserve existing non-null context values using $ifNull
+                        "run_id": {"$ifNull": [trace.run_id, "$run_id"]},
+                        "session_id": {"$ifNull": [trace.session_id, "$session_id"]},
+                        "user_id": {"$ifNull": [trace.user_id, "$user_id"]},
+                        "agent_id": {"$ifNull": [trace.agent_id, "$agent_id"]},
+                        "team_id": {"$ifNull": [trace.team_id, "$team_id"]},
+                        "workflow_id": {"$ifNull": [trace.workflow_id, "$workflow_id"]},
+                    }
+                },
+                {
+                    "$set": {
+                        # Calculate duration_ms from the (potentially updated) start_time and end_time
+                        # MongoDB stores dates as strings in ISO format, so we need to parse them
+                        "duration_ms": {
+                            "$cond": {
+                                "if": {
+                                    "$and": [
+                                        {"$ne": [{"$type": "$start_time"}, "missing"]},
+                                        {"$ne": [{"$type": "$end_time"}, "missing"]},
+                                    ]
+                                },
+                                "then": {
+                                    "$subtract": [
+                                        {"$toLong": {"$toDate": "$end_time"}},
+                                        {"$toLong": {"$toDate": "$start_time"}},
+                                    ]
+                                },
+                                "else": trace_dict.get("duration_ms", 0),
+                            }
+                        },
+                        # Update name based on component level priority
+                        # Only update if new trace is from a higher-level component
+                        "name": {
+                            "$cond": {
+                                "if": {"$eq": [{"$type": "$name"}, "missing"]},
+                                "then": trace.name,
+                                "else": {
+                                    "$cond": {
+                                        "if": {
+                                            "$gt": [
+                                                new_level,
+                                                {
+                                                    "$switch": {
+                                                        "branches": [
+                                                            # Check if existing name is a root span
+                                                            {
+                                                                "case": {
+                                                                    "$not": {
+                                                                        "$or": [
+                                                                            {
+                                                                                "$regexMatch": {
+                                                                                    "input": {"$ifNull": ["$name", ""]},
+                                                                                    "regex": "\\.run",
+                                                                                }
+                                                                            },
+                                                                            {
+                                                                                "$regexMatch": {
+                                                                                    "input": {"$ifNull": ["$name", ""]},
+                                                                                    "regex": "\\.arun",
+                                                                                }
+                                                                            },
+                                                                        ]
+                                                                    }
+                                                                },
+                                                                "then": 0,
+                                                            },
+                                                            # Workflow root (level 3)
+                                                            {
+                                                                "case": {"$ne": ["$workflow_id", None]},
+                                                                "then": 3,
+                                                            },
+                                                            # Team root (level 2)
+                                                            {
+                                                                "case": {"$ne": ["$team_id", None]},
+                                                                "then": 2,
+                                                            },
+                                                            # Agent root (level 1)
+                                                            {
+                                                                "case": {"$ne": ["$agent_id", None]},
+                                                                "then": 1,
+                                                            },
+                                                        ],
+                                                        "default": 0,
+                                                    }
+                                                },
+                                            ]
+                                        },
+                                        "then": trace.name,
+                                        "else": "$name",
+                                    }
+                                },
+                            }
+                        },
+                    }
+                },
+            ]
+
+            # Perform atomic upsert using aggregation pipeline
+            await collection.update_one(
+                {"trace_id": trace.trace_id},
+                pipeline,
+                upsert=True,
+            )
+
+        except Exception as e:
+            log_error(f"Error creating trace: {str(e)}")
+            # Don't raise - tracing should not break the main application flow
+
+    async def get_trace(
+        self,
+        trace_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ):
+        """Get a single trace by trace_id or other filters.
+
+        Args:
+            trace_id: The unique trace identifier.
+            run_id: Filter by run ID (returns first match).
+
+        Returns:
+            Optional[Trace]: The trace if found, None otherwise.
+
+        Note:
+            If multiple filters are provided, trace_id takes precedence.
+            For other filters, the most recent trace is returned.
+        """
+        try:
+            from agno.tracing.schemas import Trace as TraceSchema
+
+            collection = await self._get_collection(table_type="traces")
+            if collection is None:
+                return None
+
+            # Get spans collection for aggregation
+            spans_collection = await self._get_collection(table_type="spans")
+
+            query: Dict[str, Any] = {}
+            if trace_id:
+                query["trace_id"] = trace_id
+            elif run_id:
+                query["run_id"] = run_id
+            else:
+                log_debug("get_trace called without any filter parameters")
+                return None
+
+            # Find trace with sorting by most recent
+            result = await collection.find_one(query, sort=[("start_time", -1)])
+
+            if result:
+                # Calculate total_spans and error_count from spans collection
+                total_spans = 0
+                error_count = 0
+                if spans_collection is not None:
+                    total_spans = await spans_collection.count_documents({"trace_id": result["trace_id"]})
+                    error_count = await spans_collection.count_documents(
+                        {"trace_id": result["trace_id"], "status_code": "ERROR"}
+                    )
+
+                result["total_spans"] = total_spans
+                result["error_count"] = error_count
+                # Remove MongoDB's _id field
+                result.pop("_id", None)
+                return TraceSchema.from_dict(result)
+            return None
+
+        except Exception as e:
+            log_error(f"Error getting trace: {str(e)}")
+            return None
+
+    async def get_traces(
+        self,
+        run_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
+        status: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: Optional[int] = 20,
+        page: Optional[int] = 1,
+    ) -> tuple[List, int]:
+        """Get traces matching the provided filters with pagination.
+
+        Args:
+            run_id: Filter by run ID.
+            session_id: Filter by session ID.
+            user_id: Filter by user ID.
+            agent_id: Filter by agent ID.
+            team_id: Filter by team ID.
+            workflow_id: Filter by workflow ID.
+            status: Filter by status (OK, ERROR, UNSET).
+            start_time: Filter traces starting after this datetime.
+            end_time: Filter traces ending before this datetime.
+            limit: Maximum number of traces to return per page.
+            page: Page number (1-indexed).
+
+        Returns:
+            tuple[List[Trace], int]: Tuple of (list of matching traces, total count).
+        """
+        try:
+            from agno.tracing.schemas import Trace as TraceSchema
+
+            collection = await self._get_collection(table_type="traces")
+            if collection is None:
+                log_debug("Traces collection not found")
+                return [], 0
+
+            # Get spans collection for aggregation
+            spans_collection = await self._get_collection(table_type="spans")
+
+            # Build query
+            query: Dict[str, Any] = {}
+            if run_id:
+                query["run_id"] = run_id
+            if session_id:
+                query["session_id"] = session_id
+            if user_id is not None:
+                query["user_id"] = user_id
+            if agent_id:
+                query["agent_id"] = agent_id
+            if team_id:
+                query["team_id"] = team_id
+            if workflow_id:
+                query["workflow_id"] = workflow_id
+            if status:
+                query["status"] = status
+            if start_time:
+                query["start_time"] = {"$gte": start_time.isoformat()}
+            if end_time:
+                if "end_time" in query:
+                    query["end_time"]["$lte"] = end_time.isoformat()
+                else:
+                    query["end_time"] = {"$lte": end_time.isoformat()}
+
+            # Get total count
+            total_count = await collection.count_documents(query)
+
+            # Apply pagination
+            skip = ((page or 1) - 1) * (limit or 20)
+            cursor = collection.find(query).sort("start_time", -1).skip(skip).limit(limit or 20)
+
+            results = await cursor.to_list(length=None)
+
+            traces = []
+            for row in results:
+                # Calculate total_spans and error_count from spans collection
+                total_spans = 0
+                error_count = 0
+                if spans_collection is not None:
+                    total_spans = await spans_collection.count_documents({"trace_id": row["trace_id"]})
+                    error_count = await spans_collection.count_documents(
+                        {"trace_id": row["trace_id"], "status_code": "ERROR"}
+                    )
+
+                row["total_spans"] = total_spans
+                row["error_count"] = error_count
+                # Remove MongoDB's _id field
+                row.pop("_id", None)
+                traces.append(TraceSchema.from_dict(row))
+
+            return traces, total_count
+
+        except Exception as e:
+            log_error(f"Error getting traces: {str(e)}")
+            return [], 0
+
+    async def get_trace_stats(
+        self,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: Optional[int] = 20,
+        page: Optional[int] = 1,
+    ) -> tuple[List[Dict[str, Any]], int]:
+        """Get trace statistics grouped by session.
+
+        Args:
+            user_id: Filter by user ID.
+            agent_id: Filter by agent ID.
+            team_id: Filter by team ID.
+            workflow_id: Filter by workflow ID.
+            start_time: Filter sessions with traces created after this datetime.
+            end_time: Filter sessions with traces created before this datetime.
+            limit: Maximum number of sessions to return per page.
+            page: Page number (1-indexed).
+
+        Returns:
+            tuple[List[Dict], int]: Tuple of (list of session stats dicts, total count).
+                Each dict contains: session_id, user_id, agent_id, team_id, total_traces,
+                workflow_id, first_trace_at, last_trace_at.
+        """
+        try:
+            collection = await self._get_collection(table_type="traces")
+            if collection is None:
+                log_debug("Traces collection not found")
+                return [], 0
+
+            # Build match stage
+            match_stage: Dict[str, Any] = {"session_id": {"$ne": None}}
+            if user_id is not None:
+                match_stage["user_id"] = user_id
+            if agent_id:
+                match_stage["agent_id"] = agent_id
+            if team_id:
+                match_stage["team_id"] = team_id
+            if workflow_id:
+                match_stage["workflow_id"] = workflow_id
+            if start_time:
+                match_stage["created_at"] = {"$gte": start_time.isoformat()}
+            if end_time:
+                if "created_at" in match_stage:
+                    match_stage["created_at"]["$lte"] = end_time.isoformat()
+                else:
+                    match_stage["created_at"] = {"$lte": end_time.isoformat()}
+
+            # Build aggregation pipeline
+            pipeline: List[Dict[str, Any]] = [
+                {"$match": match_stage},
+                {
+                    "$group": {
+                        "_id": "$session_id",
+                        "user_id": {"$first": "$user_id"},
+                        "agent_id": {"$first": "$agent_id"},
+                        "team_id": {"$first": "$team_id"},
+                        "workflow_id": {"$first": "$workflow_id"},
+                        "total_traces": {"$sum": 1},
+                        "first_trace_at": {"$min": "$created_at"},
+                        "last_trace_at": {"$max": "$created_at"},
+                    }
+                },
+                {"$sort": {"last_trace_at": -1}},
+            ]
+
+            # Get total count
+            count_pipeline = pipeline + [{"$count": "total"}]
+            count_result = await collection.aggregate(count_pipeline).to_list(length=1)
+            total_count = count_result[0]["total"] if count_result else 0
+
+            # Apply pagination
+            skip = ((page or 1) - 1) * (limit or 20)
+            pipeline.append({"$skip": skip})
+            pipeline.append({"$limit": limit or 20})
+
+            results = await collection.aggregate(pipeline).to_list(length=None)
+
+            # Convert to list of dicts with datetime objects
+            stats_list = []
+            for row in results:
+                # Convert ISO strings to datetime objects
+                first_trace_at_str = row["first_trace_at"]
+                last_trace_at_str = row["last_trace_at"]
+
+                # Parse ISO format strings to datetime objects
+                first_trace_at = datetime.fromisoformat(first_trace_at_str.replace("Z", "+00:00"))
+                last_trace_at = datetime.fromisoformat(last_trace_at_str.replace("Z", "+00:00"))
+
+                stats_list.append(
+                    {
+                        "session_id": row["_id"],
+                        "user_id": row["user_id"],
+                        "agent_id": row["agent_id"],
+                        "team_id": row["team_id"],
+                        "workflow_id": row["workflow_id"],
+                        "total_traces": row["total_traces"],
+                        "first_trace_at": first_trace_at,
+                        "last_trace_at": last_trace_at,
+                    }
+                )
+
+            return stats_list, total_count
+
+        except Exception as e:
+            log_error(f"Error getting trace stats: {str(e)}")
+            return [], 0
+
+    # --- Spans ---
+    async def create_span(self, span: "Span") -> None:
+        """Create a single span in the database.
+
+        Args:
+            span: The Span object to store.
+        """
+        try:
+            collection = await self._get_collection(table_type="spans", create_collection_if_not_found=True)
+            if collection is None:
+                return
+
+            await collection.insert_one(span.to_dict())
+
+        except Exception as e:
+            log_error(f"Error creating span: {str(e)}")
+
+    async def create_spans(self, spans: List) -> None:
+        """Create multiple spans in the database as a batch.
+
+        Args:
+            spans: List of Span objects to store.
+        """
+        if not spans:
+            return
+
+        try:
+            collection = await self._get_collection(table_type="spans", create_collection_if_not_found=True)
+            if collection is None:
+                return
+
+            span_dicts = [span.to_dict() for span in spans]
+            await collection.insert_many(span_dicts)
+
+        except Exception as e:
+            log_error(f"Error creating spans batch: {str(e)}")
+
+    async def get_span(self, span_id: str):
+        """Get a single span by its span_id.
+
+        Args:
+            span_id: The unique span identifier.
+
+        Returns:
+            Optional[Span]: The span if found, None otherwise.
+        """
+        try:
+            from agno.tracing.schemas import Span as SpanSchema
+
+            collection = await self._get_collection(table_type="spans")
+            if collection is None:
+                return None
+
+            result = await collection.find_one({"span_id": span_id})
+            if result:
+                # Remove MongoDB's _id field
+                result.pop("_id", None)
+                return SpanSchema.from_dict(result)
+            return None
+
+        except Exception as e:
+            log_error(f"Error getting span: {str(e)}")
+            return None
+
+    async def get_spans(
+        self,
+        trace_id: Optional[str] = None,
+        parent_span_id: Optional[str] = None,
+        limit: Optional[int] = 1000,
+    ) -> List:
+        """Get spans matching the provided filters.
+
+        Args:
+            trace_id: Filter by trace ID.
+            parent_span_id: Filter by parent span ID.
+            limit: Maximum number of spans to return.
+
+        Returns:
+            List[Span]: List of matching spans.
+        """
+        try:
+            from agno.tracing.schemas import Span as SpanSchema
+
+            collection = await self._get_collection(table_type="spans")
+            if collection is None:
+                return []
+
+            # Build query
+            query: Dict[str, Any] = {}
+            if trace_id:
+                query["trace_id"] = trace_id
+            if parent_span_id:
+                query["parent_span_id"] = parent_span_id
+
+            cursor = collection.find(query).limit(limit or 1000)
+            results = await cursor.to_list(length=None)
+
+            spans = []
+            for row in results:
+                # Remove MongoDB's _id field
+                row.pop("_id", None)
+                spans.append(SpanSchema.from_dict(row))
+
+            return spans
+
+        except Exception as e:
+            log_error(f"Error getting spans: {str(e)}")
+            return []
+
+    # -- Learning methods --
+    async def get_learning(
+        self,
+        learning_type: str,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        namespace: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        entity_type: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Retrieve a learning record.
+
+        Args:
+            learning_type: Type of learning ('user_profile', 'session_context', etc.)
+            user_id: Filter by user ID.
+            agent_id: Filter by agent ID.
+            team_id: Filter by team ID.
+            session_id: Filter by session ID.
+            namespace: Filter by namespace ('user', 'global', or custom).
+            entity_id: Filter by entity ID (for entity-specific learnings).
+            entity_type: Filter by entity type ('person', 'company', etc.).
+
+        Returns:
+            Dict with 'content' key containing the learning data, or None.
+        """
+        try:
+            collection = await self._get_collection(table_type="learnings", create_collection_if_not_found=False)
+            if collection is None:
+                return None
+
+            # Build query
+            query: Dict[str, Any] = {"learning_type": learning_type}
+            if user_id is not None:
+                query["user_id"] = user_id
+            if agent_id is not None:
+                query["agent_id"] = agent_id
+            if team_id is not None:
+                query["team_id"] = team_id
+            if session_id is not None:
+                query["session_id"] = session_id
+            if namespace is not None:
+                query["namespace"] = namespace
+            if entity_id is not None:
+                query["entity_id"] = entity_id
+            if entity_type is not None:
+                query["entity_type"] = entity_type
+
+            result = await collection.find_one(query)
+            if result is None:
+                return None
+
+            # Remove MongoDB's _id field
+            result.pop("_id", None)
+            return {"content": result.get("content")}
+
+        except Exception as e:
+            log_debug(f"Error retrieving learning: {e}")
+            return None
+
+    async def upsert_learning(
+        self,
+        id: str,
+        learning_type: str,
+        content: Dict[str, Any],
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        namespace: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Insert or update a learning record.
+
+        Args:
+            id: Unique identifier for the learning.
+            learning_type: Type of learning ('user_profile', 'session_context', etc.)
+            content: The learning content as a dict.
+            user_id: Associated user ID.
+            agent_id: Associated agent ID.
+            team_id: Associated team ID.
+            session_id: Associated session ID.
+            namespace: Namespace for scoping ('user', 'global', or custom).
+            entity_id: Associated entity ID (for entity-specific learnings).
+            entity_type: Entity type ('person', 'company', etc.).
+            metadata: Optional metadata.
+        """
+        try:
+            collection = await self._get_collection(table_type="learnings", create_collection_if_not_found=True)
+            if collection is None:
+                return
+
+            current_time = int(time.time())
+
+            document = {
+                "learning_id": id,
+                "learning_type": learning_type,
+                "namespace": namespace,
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "team_id": team_id,
+                "session_id": session_id,
+                "entity_id": entity_id,
+                "entity_type": entity_type,
+                "content": content,
+                "metadata": metadata,
+                "updated_at": current_time,
+            }
+
+            # Use upsert to insert or update
+            await collection.update_one(
+                {"learning_id": id},
+                {"$set": document, "$setOnInsert": {"created_at": current_time}},
+                upsert=True,
+            )
+
+            log_debug(f"Upserted learning: {id}")
+
+        except Exception as e:
+            log_debug(f"Error upserting learning: {e}")
+
+    async def delete_learning(self, id: str) -> bool:
+        """Delete a learning record.
+
+        Args:
+            id: The learning ID to delete.
+
+        Returns:
+            True if deleted, False otherwise.
+        """
+        try:
+            collection = await self._get_collection(table_type="learnings", create_collection_if_not_found=False)
+            if collection is None:
+                return False
+
+            result = await collection.delete_one({"learning_id": id})
+            return result.deleted_count > 0
+
+        except Exception as e:
+            log_debug(f"Error deleting learning: {e}")
+            return False
+
+    async def get_learnings(
+        self,
+        learning_type: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        namespace: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get multiple learning records.
+
+        Args:
+            learning_type: Filter by learning type.
+            user_id: Filter by user ID.
+            agent_id: Filter by agent ID.
+            team_id: Filter by team ID.
+            session_id: Filter by session ID.
+            namespace: Filter by namespace ('user', 'global', or custom).
+            entity_id: Filter by entity ID (for entity-specific learnings).
+            entity_type: Filter by entity type ('person', 'company', etc.).
+            limit: Maximum number of records to return.
+
+        Returns:
+            List of learning records.
+        """
+        try:
+            collection = await self._get_collection(table_type="learnings", create_collection_if_not_found=False)
+            if collection is None:
+                return []
+
+            # Build query
+            query: Dict[str, Any] = {}
+            if learning_type is not None:
+                query["learning_type"] = learning_type
+            if user_id is not None:
+                query["user_id"] = user_id
+            if agent_id is not None:
+                query["agent_id"] = agent_id
+            if team_id is not None:
+                query["team_id"] = team_id
+            if session_id is not None:
+                query["session_id"] = session_id
+            if namespace is not None:
+                query["namespace"] = namespace
+            if entity_id is not None:
+                query["entity_id"] = entity_id
+            if entity_type is not None:
+                query["entity_type"] = entity_type
+
+            cursor = collection.find(query)
+            if limit is not None:
+                cursor = cursor.limit(limit)
+
+            results = await cursor.to_list(length=None)
+
+            learnings = []
+            for row in results:
+                # Remove MongoDB's _id field
+                row.pop("_id", None)
+                learnings.append(row)
+
+            return learnings
+
+        except Exception as e:
+            log_debug(f"Error getting learnings: {e}")
+            return []

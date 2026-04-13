@@ -12,7 +12,7 @@ from agno.knowledge.chunking.strategy import ChunkingStrategy, ChunkingStrategyT
 from agno.knowledge.document.base import Document
 from agno.knowledge.reader.base import Reader
 from agno.knowledge.types import ContentType
-from agno.utils.log import log_debug, logger
+from agno.utils.log import log_debug, log_error, log_warning, logger
 
 try:
     from bs4 import BeautifulSoup, Tag  # noqa: F401
@@ -50,12 +50,18 @@ class WebSearchReader(Reader):
     _last_search_time: float = field(default=0.0, init=False)
 
     # Override default chunking strategy
-    chunking_strategy: Optional[ChunkingStrategy] = SemanticChunking()
+    chunking_strategy: Optional[ChunkingStrategy] = None
+
+    def __post_init__(self):
+        """Initialize chunking strategy with proper chunk_size"""
+        if self.chunking_strategy is None:
+            self.chunking_strategy = SemanticChunking(chunk_size=self.chunk_size)
 
     @classmethod
-    def get_supported_chunking_strategies(self) -> List[ChunkingStrategyType]:
+    def get_supported_chunking_strategies(cls) -> List[ChunkingStrategyType]:
         """Get the list of supported chunking strategies for Web Search readers."""
         return [
+            ChunkingStrategyType.CODE_CHUNKER,
             ChunkingStrategyType.AGENTIC_CHUNKER,
             ChunkingStrategyType.DOCUMENT_CHUNKER,
             ChunkingStrategyType.RECURSIVE_CHUNKER,
@@ -64,7 +70,7 @@ class WebSearchReader(Reader):
         ]
 
     @classmethod
-    def get_supported_content_types(self) -> List[ContentType]:
+    def get_supported_content_types(cls) -> List[ContentType]:
         return [ContentType.TOPIC]
 
     def _respect_rate_limits(self):
@@ -105,7 +111,7 @@ class WebSearchReader(Reader):
                 return results
 
             except Exception as e:
-                logger.warning(f"DuckDuckGo search attempt {attempt + 1} failed: {e}")
+                log_warning(f"DuckDuckGo search attempt {attempt + 1} failed: {str(e)}")
                 if "rate limit" in str(e).lower() or "429" in str(e):
                     # Rate limited - wait longer
                     wait_time = (
@@ -117,7 +123,7 @@ class WebSearchReader(Reader):
                     # Other error - shorter wait
                     time.sleep(self.search_delay)
                 else:
-                    logger.error(f"All DuckDuckGo search attempts failed: {e}")
+                    logger.exception("All DuckDuckGo search attempts failed")
                     return []
         return []
 
@@ -126,7 +132,7 @@ class WebSearchReader(Reader):
         if self.search_engine == "duckduckgo":
             return self._perform_duckduckgo_search(query)
         else:
-            logger.error(f"Unsupported search engine: {self.search_engine}")
+            log_error(f"Unsupported search engine: {self.search_engine}")
             return []
 
     def _is_valid_url(self, url: str) -> bool:
@@ -157,7 +163,7 @@ class WebSearchReader(Reader):
             return text
 
         except Exception as e:
-            logger.warning(f"Error extracting text from {url}: {e}")
+            log_warning(f"Error extracting text from {url}: {str(e)}")
             return html_content
 
     def _fetch_url_content(self, url: str) -> Optional[str]:
@@ -178,12 +184,12 @@ class WebSearchReader(Reader):
                     return response.text
 
             except Exception as e:
-                logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}")
+                log_warning(f"Attempt {attempt + 1} failed for {url}: {str(e)}")
                 if attempt < self.max_retries - 1:
                     time.sleep(random.uniform(1, 3))  # Random delay between retries
                 continue
 
-        logger.error(f"Failed to fetch content from {url} after {self.max_retries} attempts")
+        log_error(f"Failed to fetch content from {url} after {self.max_retries} attempts")
         return None
 
     def _create_document_from_url(self, url: str, content: str, search_result: Dict[str, str]) -> Document:
@@ -207,6 +213,9 @@ class WebSearchReader(Reader):
 
     def read(self, query: str) -> List[Document]:
         """Read content for a given query by performing web search and fetching content"""
+        # Clear so URLs from previous queries aren't incorrectly skipped
+        self._visited_urls.clear()
+
         if not query:
             raise ValueError("Query cannot be empty")
 
@@ -258,26 +267,25 @@ class WebSearchReader(Reader):
 
     async def async_read(self, query: str) -> List[Document]:
         """Asynchronously read content for a given query"""
+        # Clear so URLs from previous queries aren't incorrectly skipped
+        self._visited_urls.clear()
+
         if not query:
             raise ValueError("Query cannot be empty")
 
         log_debug(f"Starting async web search reader for query: {query}")
 
-        # Perform web search (synchronous operation)
         search_results = self._perform_web_search(query)
         if not search_results:
             logger.warning(f"No search results found for query: {query}")
             return []
 
-        # Create tasks for fetching content from each URL
         async def fetch_url_async(result: Dict[str, str]) -> Optional[Document]:
             url = result.get("url", "")
 
-            # Skip if URL is invalid or already visited
             if not self._is_valid_url(url):
                 return None
 
-            # Mark URL as visited
             self._visited_urls.add(url)
 
             try:
@@ -292,32 +300,25 @@ class WebSearchReader(Reader):
                     else:
                         content = response.text
 
-                    document = self._create_document_from_url(url, content, result)
-                    return document
+                    return self._create_document_from_url(url, content, result)
 
             except Exception as e:
-                logger.warning(f"Error fetching {url}: {e}")
+                log_warning(f"Error fetching {url}: {str(e)}")
                 return None
 
-        # Create tasks for all URLs
-        tasks = [fetch_url_async(result) for result in search_results]
-
-        # Execute all tasks concurrently with delays
         documents = []
-        for i, task in enumerate(tasks):
-            if i > 0:  # Add delay between requests (except for the first one)
+        for i, result in enumerate(search_results):
+            if i > 0:
                 await asyncio.sleep(self.delay_between_requests)
 
-            doc = await task
+            doc = await fetch_url_async(result)
             if doc is not None:
-                # Apply chunking if enabled
                 if self.chunk:
                     chunked_docs = await self.chunk_documents_async([doc])
                     documents.extend(chunked_docs)
                 else:
                     documents.append(doc)
 
-                # Stop if we've reached max_results
                 if len(documents) >= self.max_results:
                     break
 

@@ -8,7 +8,7 @@ from uuid import uuid4
 from agno.media import File
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
-from agno.utils.log import log_debug, logger
+from agno.utils.log import log_debug, log_warning, logger
 
 try:
     from reportlab.lib.pagesizes import letter
@@ -17,9 +17,11 @@ try:
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
     PDF_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     PDF_AVAILABLE = False
-    logger.warning("reportlab not installed. PDF generation will not be available. Install with: pip install reportlab")
+    log_warning(
+        f"reportlab not installed. PDF generation will not be available. Install with: pip install reportlab: {str(e)}"
+    )
 
 
 class FileGenerationTools(Toolkit):
@@ -108,14 +110,16 @@ class FileGenerationTools(Toolkit):
             # Save file to disk (if output_directory is set)
             file_path = self._save_file_to_disk(json_content, filename)
 
+            content_bytes = json_content.encode("utf-8")
+
             # Create FileArtifact
             file_artifact = File(
                 id=str(uuid4()),
-                content=json_content,
+                content=content_bytes,
                 mime_type="application/json",
                 file_type="json",
                 filename=filename,
-                size=len(json_content.encode("utf-8")),
+                size=len(content_bytes),
                 filepath=file_path if file_path else None,
             )
 
@@ -129,7 +133,7 @@ class FileGenerationTools(Toolkit):
             return ToolResult(content=success_msg, files=[file_artifact])
 
         except Exception as e:
-            logger.error(f"Failed to generate JSON file: {e}")
+            logger.exception("Failed to generate JSON file")
             return ToolResult(content=f"Error generating JSON file: {e}")
 
     def generate_csv_file(
@@ -195,14 +199,16 @@ class FileGenerationTools(Toolkit):
             # Save file to disk (if output_directory is set)
             file_path = self._save_file_to_disk(csv_content, filename)
 
+            content_bytes = csv_content.encode("utf-8")
+
             # Create FileArtifact
             file_artifact = File(
                 id=str(uuid4()),
-                content=csv_content,
+                content=content_bytes,
                 mime_type="text/csv",
                 file_type="csv",
                 filename=filename,
-                size=len(csv_content.encode("utf-8")),
+                size=len(content_bytes),
                 filepath=file_path if file_path else None,
             )
 
@@ -216,7 +222,7 @@ class FileGenerationTools(Toolkit):
             return ToolResult(content=success_msg, files=[file_artifact])
 
         except Exception as e:
-            logger.error(f"Failed to generate CSV file: {e}")
+            logger.exception("Failed to generate CSV file")
             return ToolResult(content=f"Error generating CSV file: {e}")
 
     def generate_pdf_file(
@@ -300,7 +306,7 @@ class FileGenerationTools(Toolkit):
             return ToolResult(content=success_msg, files=[file_artifact])
 
         except Exception as e:
-            logger.error(f"Failed to generate PDF file: {e}")
+            logger.exception("Failed to generate PDF file")
             return ToolResult(content=f"Error generating PDF file: {e}")
 
     def generate_text_file(self, content: str, filename: Optional[str] = None) -> ToolResult:
@@ -325,14 +331,16 @@ class FileGenerationTools(Toolkit):
             # Save file to disk (if output_directory is set)
             file_path = self._save_file_to_disk(content, filename)
 
+            content_bytes = content.encode("utf-8")
+
             # Create FileArtifact
             file_artifact = File(
                 id=str(uuid4()),
-                content=content,
+                content=content_bytes,
                 mime_type="text/plain",
                 file_type="txt",
                 filename=filename,
-                size=len(content.encode("utf-8")),
+                size=len(content_bytes),
                 filepath=file_path if file_path else None,
             )
 
@@ -346,5 +354,5 @@ class FileGenerationTools(Toolkit):
             return ToolResult(content=success_msg, files=[file_artifact])
 
         except Exception as e:
-            logger.error(f"Failed to generate text file: {e}")
+            logger.exception("Failed to generate text file")
             return ToolResult(content=f"Error generating text file: {e}")
