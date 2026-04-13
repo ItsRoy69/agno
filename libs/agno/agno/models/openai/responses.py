@@ -297,7 +297,7 @@ class OpenAIResponses(Model):
         # Set the response format
         if response_format is not None:
             if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-                schema = get_response_schema_for_provider(response_format, "openai")
+                schema = get_response_schema_for_provider(response_format, self.provider)
                 text_params["format"] = {
                     "type": "json_schema",
                     "name": response_format.__name__,

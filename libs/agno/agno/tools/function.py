@@ -611,15 +611,17 @@ class Function(BaseModel):
             # Make a copy to avoid modifying the original
             result = schema.copy()
 
-            # If this is an object schema, ensure additionalProperties: false
+            # If this is an object schema, ensure additionalProperties: false except when additionalProperties is already a schema (dict), which indicates a Dict[str, T] field — overwriting it with False breaks dict parameter schemas.
             if result.get("type") == "object" or "properties" in result:
-                result["additionalProperties"] = False
+                if not isinstance(result.get("additionalProperties"), dict):
+                    result["additionalProperties"] = False
 
             # If schema has no type but has other schema properties, give it a type
             if "type" not in result:
                 if "properties" in result:
                     result["type"] = "object"
-                    result["additionalProperties"] = False
+                    if not isinstance(result.get("additionalProperties"), dict):
+                        result["additionalProperties"] = False
                 elif result.get("title") and not any(
                     key in result for key in ["properties", "items", "anyOf", "oneOf", "allOf", "enum"]
                 ):
