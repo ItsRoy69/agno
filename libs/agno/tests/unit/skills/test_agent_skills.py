@@ -227,6 +227,15 @@ def test_get_system_prompt_shows_none_when_no_scripts(minimal_skill: Skill) -> N
     assert "<scripts>none</scripts>" in snippet
 
 
+def test_get_system_prompt_shows_none_when_no_references(minimal_skill: Skill) -> None:
+    """Test that system prompt shows <references>none</references> when skill has no references."""
+    loader = MockSkillLoader([minimal_skill])
+    skills = Skills(loaders=[loader])
+    snippet = skills.get_system_prompt_snippet()
+
+    assert "<references>none</references>" in snippet
+
+
 def test_get_system_prompt_includes_references(mock_loader: MockSkillLoader) -> None:
     """Test that system prompt includes references list."""
     skills = Skills(loaders=[mock_loader])
@@ -269,6 +278,16 @@ def test_get_tools_returns_three_functions(mock_loader: MockSkillLoader) -> None
     assert "get_skill_instructions" in tool_names
     assert "get_skill_reference" in tool_names
     assert "get_skill_script" in tool_names
+
+
+def test_get_tools_returns_only_instructions_when_no_scripts_or_references(minimal_skill: Skill) -> None:
+    """Test that only get_skill_instructions is exposed for SKILL.md-only skills."""
+    loader = MockSkillLoader([minimal_skill])
+    skills = Skills(loaders=[loader])
+    tools = skills.get_tools()
+
+    assert len(tools) == 1
+    assert tools[0].name == "get_skill_instructions"
 
 
 # --- Skill Instructions Tool Tests ---
