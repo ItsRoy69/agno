@@ -153,16 +153,17 @@ class Skills:
         lines.append("This approach ensures you only load detailed instructions when actually needed.")
 
         if has_scripts:
+            lines.append("")
             lines.append(
                 "**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when `<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`."
             )
-            lines.append("")
         elif not has_references:
+            lines.append("")
             lines.append(
                 "**IMPORTANT**: Loaded skills do not currently expose any references or scripts. Only use `get_skill_instructions` unless the available skills metadata shows additional files."
             )
-            lines.append("")
 
+        lines.append("")
         lines.append("## Available Skills")
 
         for skill in self._skills.values():
