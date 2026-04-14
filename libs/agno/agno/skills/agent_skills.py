@@ -142,13 +142,16 @@ class Skills:
             "",
             "## IMPORTANT: How to Use Skills",
             "**Skill names are NOT callable functions.** You cannot call a skill directly by its name.",
-            "Instead, you MUST use the provided skill access tools:",
-            "",
         ]
-        for i, desc in enumerate(tool_descriptions, start=1):
-            lines.append(f"{i}. {desc}")
-
-        lines.append("")
+        if len(tool_descriptions) > 1:
+            lines.append("Instead, you MUST use the provided skill access tools:")
+            lines.append("")
+            for i, desc in enumerate(tool_descriptions, start=1):
+                lines.append(f"{i}. {desc}")
+            lines.append("")
+        else:
+            lines.append("Instead, you MUST use `get_skill_instructions(skill_name)` to load the full instructions for a skill.")
+            lines.append("")
         lines.append("## Progressive Discovery Workflow")
         for i, step in enumerate(workflow_steps, start=1):
             lines.append(f"{i}. {step}")
