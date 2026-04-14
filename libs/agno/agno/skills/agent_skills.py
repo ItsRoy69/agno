@@ -108,6 +108,25 @@ class Skills:
         has_references = self._has_any_references()
         has_scripts = self._has_any_scripts()
 
+        tool_descriptions = [
+            "`get_skill_instructions(skill_name)` - Load the full instructions for a skill",
+        ]
+        if has_references:
+            tool_descriptions.append(
+                "`get_skill_reference(skill_name, reference_path)` - Access specific documentation"
+            )
+        if has_scripts:
+            tool_descriptions.append("`get_skill_script(skill_name, script_path, execute=False)` - Read or run scripts")
+
+        workflow_steps = [
+            "**Browse**: Review the skill summaries below to understand what's available",
+            "**Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first",
+        ]
+        if has_references:
+            workflow_steps.append("**Reference**: Use `get_skill_reference` to access specific documentation as needed")
+        if has_scripts:
+            workflow_steps.append("**Scripts**: Use `get_skill_script` to read or execute scripts from a skill")
+
         lines = [
             "<skills_system>",
             "",
@@ -121,28 +140,17 @@ class Skills:
             "**Skill names are NOT callable functions.** You cannot call a skill directly by its name.",
             "Instead, you MUST use the provided skill access tools:",
             "",
-            "1. `get_skill_instructions(skill_name)` - Load the full instructions for a skill",
-            "",
-            "## Progressive Discovery Workflow",
-            "1. **Browse**: Review the skill summaries below to understand what's available",
-            "2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first",
-            "",
-            "This approach ensures you only load detailed instructions when actually needed.",
         ]
+        for i, desc in enumerate(tool_descriptions, start=1):
+            lines.append(f"{i}. {desc}")
 
-        if has_references:
-            lines.append("2. `get_skill_reference(skill_name, reference_path)` - Access specific documentation")
-        if has_scripts:
-            next_step = 2 + int(has_references)
-            lines.append(
-                f"{next_step}. `get_skill_script(skill_name, script_path, execute=False)` - Read or run scripts"
-            )
+        lines.append("")
+        lines.append("## Progressive Discovery Workflow")
+        for i, step in enumerate(workflow_steps, start=1):
+            lines.append(f"{i}. {step}")
 
-        if has_references:
-            lines.append("3. **Reference**: Use `get_skill_reference` to access specific documentation as needed")
-        if has_scripts:
-            script_step = 3 + int(has_references)
-            lines.append(f"{script_step}. **Scripts**: Use `get_skill_script` to read or execute scripts from a skill")
+        lines.append("")
+        lines.append("This approach ensures you only load detailed instructions when actually needed.")
 
         if has_scripts:
             lines.append(
