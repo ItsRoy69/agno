@@ -116,14 +116,18 @@ class Skills:
                 "`get_skill_reference(skill_name, reference_path)` - Access specific documentation"
             )
         if has_scripts:
-            tool_descriptions.append("`get_skill_script(skill_name, script_path, execute=False)` - Read or run scripts")
+            tool_descriptions.append(
+                "`get_skill_script(skill_name, script_path, execute=False)` - Read or run scripts"
+            )
 
         workflow_steps = [
             "**Browse**: Review the skill summaries below to understand what's available",
             "**Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first",
         ]
         if has_references:
-            workflow_steps.append("**Reference**: Use `get_skill_reference` to access specific documentation as needed")
+            workflow_steps.append(
+                "**Reference**: Use `get_skill_reference` to access specific documentation as needed"
+            )
         if has_scripts:
             workflow_steps.append("**Scripts**: Use `get_skill_script` to read or execute scripts from a skill")
 
