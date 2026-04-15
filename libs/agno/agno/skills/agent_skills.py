@@ -146,16 +146,13 @@ class Skills:
             "",
             "## IMPORTANT: How to Use Skills",
             "**Skill names are NOT callable functions.** You cannot call a skill directly by its name.",
+            "Instead, you MUST use the provided skill access tools:",
+            ""
         ])
-        if len(tool_descriptions) > 1:
-            lines.append("Instead, you MUST use the provided skill access tools:")
-            lines.append("")
-            for i, desc in enumerate(tool_descriptions, start=1):
-                lines.append(f"{i}. {desc}")
-            lines.append("")
-        else:
-            lines.append("Instead, you MUST use `get_skill_instructions(skill_name)` to load the full instructions for a skill.")
-            lines.append("")
+        lines.append("")
+        for i, desc in enumerate(tool_descriptions, start=1):
+            lines.append(f"{i}. {desc}")
+        lines.append("")
         lines.append("## Progressive Discovery Workflow")
         for i, step in enumerate(workflow_steps, start=1):
             lines.append(f"{i}. {step}")
@@ -163,11 +160,13 @@ class Skills:
         lines.append("")
         lines.append("This approach ensures you only load detailed instructions when actually needed.")
 
-        if has_scripts:
+        if has_references:
             lines.append("")
             lines.append(
                 "**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when `<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`."
             )
+        if has_scripts:
+            lines.append("Only use `get_skill_script` when `<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`.")
         elif not has_references:
             lines.append("")
             lines.append(

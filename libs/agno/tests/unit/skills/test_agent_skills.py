@@ -579,3 +579,213 @@ def test_skill_script_execute_path_traversal_blocked(mock_loader: MockSkillLoade
 
     assert "error" in result
     assert "not found" in result["error"].lower()
+
+
+# --- Mixed-Case Tests (some skills have scripts/references, others don't) ---
+
+def test_system_prompt_mixed_scripts_shows_names_and_none(
+    sample_skill: Skill, minimal_skill: Skill
+) -> None:
+    """Test system prompt lists script names for skills that have them and 'none' for those that don't."""
+    loader = MockSkillLoader([sample_skill, minimal_skill])
+    skills = Skills(loaders=[loader])
+    snippet = skills.get_system_prompt_snippet()
+
+    assert "helper.py" in snippet
+    assert "<scripts>none</scripts>" in snippet
+
+
+def test_system_prompt_mixed_references_shows_names_and_none(
+    sample_skill: Skill, minimal_skill: Skill
+) -> None:
+    """Test system prompt lists reference names for skills that have them and 'none' for those that don't."""
+    loader = MockSkillLoader([sample_skill, minimal_skill])
+    skills = Skills(loaders=[loader])
+    snippet = skills.get_system_prompt_snippet()
+
+    assert "guide.md" in snippet
+    assert "<references>none</references>" in snippet
+
+
+def test_system_prompt_mixed_both_skill_blocks_are_present(
+    sample_skill: Skill, minimal_skill: Skill
+) -> None:
+    """Test that both skill blocks appear in the system prompt under a mixed load."""
+    loader = MockSkillLoader([sample_skill, minimal_skill])
+    skills = Skills(loaders=[loader])
+    snippet = skills.get_system_prompt_snippet()
+
+    assert "<name>test-skill</name>" in snippet
+    assert "<name>minimal-skill</name>" in snippet
+
+
+def test_has_any_scripts_true_when_at_least_one_skill_has_scripts(
+    sample_skill: Skill, minimal_skill: Skill
+) -> None:
+    """_has_any_scripts() must return True when at least one skill has scripts."""
+    loader = MockSkillLoader([sample_skill, minimal_skill])
+    skills = Skills(loaders=[loader])
+
+    assert skills._has_any_scripts() is True
+
+
+def test_has_any_references_true_when_at_least_one_skill_has_references(
+    sample_skill: Skill, minimal_skill: Skill
+) -> None:
+    """_has_any_references() must return True when at least one skill has references."""
+    loader = MockSkillLoader([sample_skill, minimal_skill])
+    skills = Skills(loaders=[loader])
+
+    assert skills._has_any_references() is True
+
+
+def test_get_tools_exposes_script_tool_when_at_least_one_skill_has_scripts(
+    sample_skill: Skill, minimal_skill: Skill
+) -> None:
+    """get_skill_script tool must be exposed when any skill in the set has scripts,
+    even if other skills don't."""
+    loader = MockSkillLoader([sample_skill, minimal_skill])
+    skills = Skills(loaders=[loader])
+    tool_names = {t.name for t in skills.get_tools()}
+
+    assert "get_skill_script" in tool_names
+
+
+def test_get_tools_exposes_reference_tool_when_at_least_one_skill_has_references(
+    sample_skill: Skill, minimal_skill: Skill
+) -> None:
+    """get_skill_reference tool must be exposed when any skill in the set has references,
+    even if other skills don't."""
+    loader = MockSkillLoader([sample_skill, minimal_skill])
+    skills = Skills(loaders=[loader])
+    tool_names = {t.name for t in skills.get_tools()}
+
+    assert "get_skill_reference" in tool_names
+
+
+def test_get_tools_returns_all_three_tools_in_mixed_case(
+    sample_skill: Skill, minimal_skill: Skill
+) -> None:
+    """All three tools are returned when the mix contains at least one skill with
+    scripts and at least one with references (even if not the same skill)."""
+    loader = MockSkillLoader([sample_skill, minimal_skill])
+    skills = Skills(loaders=[loader])
+    tool_names = {t.name for t in skills.get_tools()}
+
+    assert tool_names == {"get_skill_instructions", "get_skill_reference", "get_skill_script"}
+
+
+def test_system_prompt_progressive_discovery_includes_script_tool_in_mixed_case(
+    sample_skill: Skill, minimal_skill: Skill
+) -> None:
+    """The progressive discovery workflow section must reference get_skill_script
+    when at least one skill carries scripts."""
+    loader = MockSkillLoader([sample_skill, minimal_skill])
+    skills = Skills(loaders=[loader])
+    snippet = skills.get_system_prompt_snippet()
+
+    assert "get_skill_script" in snippet
+
+
+def test_system_prompt_progressive_discovery_includes_reference_tool_in_mixed_case(
+    sample_skill: Skill, minimal_skill: Skill
+) -> None:
+    """The progressive discovery workflow section must reference get_skill_reference
+    when at least one skill carries references."""
+    loader = MockSkillLoader([sample_skill, minimal_skill])
+    skills = Skills(loaders=[loader])
+    snippet = skills.get_system_prompt_snippet()
+
+    assert "get_skill_reference" in snippet
+
+
+def test_system_prompt_mixed_scripts_only_and_refs_only_skills() -> None:
+    """Test a mix where one skill has scripts but no references and another has
+    references but no scripts — each block is rendered correctly."""
+    scripts_only = Skill(
+        name="scripts-only-skill",
+        description="A skill with scripts but no references",
+        instructions="Use the scripts",
+        source_path="/scripts-only",
+        scripts=["run.sh"],
+        references=[],
+    )
+    refs_only = Skill(
+        name="refs-only-skill",
+        description="A skill with references but no scripts",
+        instructions="Read the references",
+        source_path="/refs-only",
+        scripts=[],
+        references=["readme.md"],
+    )
+
+    loader = MockSkillLoader([scripts_only, refs_only])
+    skills = Skills(loaders=[loader])
+    snippet = skills.get_system_prompt_snippet()
+
+    assert "<scripts>run.sh</scripts>" in snippet
+    assert "<references>readme.md</references>" in snippet
+    assert "<scripts>none</scripts>" in snippet
+    assert "<references>none</references>" in snippet
+
+    tool_names = {t.name for t in skills.get_tools()}
+    assert "get_skill_script" in tool_names
+    assert "get_skill_reference" in tool_names
+
+
+def test_has_any_scripts_false_when_no_skill_has_scripts(minimal_skill: Skill) -> None:
+    """_has_any_scripts() must return False when none of the loaded skills have scripts."""
+    another_minimal = Skill(
+        name="another-minimal",
+        description="Also no scripts",
+        instructions="Nothing here",
+        source_path="/other",
+    )
+    loader = MockSkillLoader([minimal_skill, another_minimal])
+    skills = Skills(loaders=[loader])
+
+    assert skills._has_any_scripts() is False
+
+
+def test_has_any_references_false_when_no_skill_has_references(minimal_skill: Skill) -> None:
+    """_has_any_references() must return False when none of the loaded skills have references."""
+    another_minimal = Skill(
+        name="another-minimal",
+        description="Also no references",
+        instructions="Nothing here",
+        source_path="/other",
+    )
+    loader = MockSkillLoader([minimal_skill, another_minimal])
+    skills = Skills(loaders=[loader])
+
+    assert skills._has_any_references() is False
+
+
+def test_get_tools_omits_script_tool_when_no_skill_has_scripts(minimal_skill: Skill) -> None:
+    """get_skill_script must NOT be exposed when every loaded skill lacks scripts."""
+    another_minimal = Skill(
+        name="another-minimal",
+        description="Also no scripts",
+        instructions="Nothing here",
+        source_path="/other",
+    )
+    loader = MockSkillLoader([minimal_skill, another_minimal])
+    skills = Skills(loaders=[loader])
+    tool_names = {t.name for t in skills.get_tools()}
+
+    assert "get_skill_script" not in tool_names
+
+
+def test_get_tools_omits_reference_tool_when_no_skill_has_references(minimal_skill: Skill) -> None:
+    """get_skill_reference must NOT be exposed when every loaded skill lacks references."""
+    another_minimal = Skill(
+        name="another-minimal",
+        description="Also no references",
+        instructions="Nothing here",
+        source_path="/other",
+    )
+    loader = MockSkillLoader([minimal_skill, another_minimal])
+    skills = Skills(loaders=[loader])
+    tool_names = {t.name for t in skills.get_tools()}
+
+    assert "get_skill_reference" not in tool_names
