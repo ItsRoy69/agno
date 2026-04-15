@@ -137,12 +137,16 @@ class Skills:
             "## What are Skills?",
             "Skills are packages of domain expertise that extend your capabilities. Each skill contains:",
             "- **Instructions**: Detailed guidance on when and how to apply the skill",
-            "- **Scripts**: Executable code templates you can use or adapt",
-            "- **References**: Supporting documentation (guides, cheatsheets, examples)",
+        ]
+        if has_scripts:
+            lines.append("- **Scripts**: Executable code templates you can use or adapt")
+        if has_references:
+            lines.append("- **References**: Supporting documentation (guides, cheatsheets, examples)")
+        lines.extend([
             "",
             "## IMPORTANT: How to Use Skills",
             "**Skill names are NOT callable functions.** You cannot call a skill directly by its name.",
-        ]
+        ])
         if len(tool_descriptions) > 1:
             lines.append("Instead, you MUST use the provided skill access tools:")
             lines.append("")
