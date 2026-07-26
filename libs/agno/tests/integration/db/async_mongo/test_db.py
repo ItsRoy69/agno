@@ -1,4 +1,11 @@
-"""Integration tests for the setup and main methods of the AsyncMongoDb class"""
+"""Integration tests for the setup and main methods of the AsyncMongoDb class
+
+Required to have a running MongoDB instance to run these tests.
+
+These tests assume:
+- Username=mongoadmin
+- Password=secret
+"""
 
 from datetime import datetime, timezone
 
@@ -7,13 +14,15 @@ import pytest
 try:
     from agno.db.mongo import AsyncMongoDb
 except ImportError:
-    pytest.skip("motor not installed, skipping AsyncMongoDb integration tests", allow_module_level=True)
+    pytest.skip(
+        "Neither motor nor pymongo async installed, skipping AsyncMongoDb integration tests", allow_module_level=True
+    )
 
 
 @pytest.mark.asyncio
 async def test_init_with_db_url():
     """Test initialization with actual database URL format"""
-    db_url = "mongodb://localhost:27017"
+    db_url = "mongodb://mongoadmin:secret@localhost:27017"
 
     db = AsyncMongoDb(db_url=db_url, db_name="test_init_db", session_collection="test_async_mongo_sessions")
     assert db.db_url == db_url
@@ -176,3 +185,34 @@ async def test_event_loop_handling_in_integration(async_mongo_db_real):
     # Should be able to recreate collections without errors
     collection = await async_mongo_db_real._get_collection("sessions", create_collection_if_not_found=True)
     assert collection is not None
+
+
+@pytest.mark.asyncio
+async def test_get_schedule_run_integration(async_mongo_db_real):
+    """Test schedule run retrieval against a real MongoDB instance."""
+    schedule_runs_collection = await async_mongo_db_real._get_collection(
+        "schedule_runs", create_collection_if_not_found=True
+    )
+    assert schedule_runs_collection is not None
+
+    run_doc = {
+        "id": "test-schedule-run-1",
+        "schedule_id": "test-schedule-1",
+        "status": "success",
+        "created_at": int(datetime.now(timezone.utc).timestamp()),
+    }
+    await schedule_runs_collection.insert_one(run_doc)
+
+    fetched = await async_mongo_db_real.get_schedule_run("test-schedule-run-1")
+    assert fetched is not None
+    assert fetched["id"] == "test-schedule-run-1"
+    assert fetched["schedule_id"] == "test-schedule-1"
+    assert fetched["status"] == "success"
+    assert "_id" not in fetched
+
+
+@pytest.mark.asyncio
+async def test_get_schedule_run_returns_none_for_missing_id(async_mongo_db_real):
+    """Test get_schedule_run returns None when the run does not exist."""
+    fetched = await async_mongo_db_real.get_schedule_run("missing-schedule-run-id")
+    assert fetched is None
